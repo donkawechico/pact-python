@@ -1,38 +1,39 @@
+from __future__ import annotations
+
 import base64
 import json
+import os
+from pathlib import Path
 
 import pytest
 
 from pact import (
     PactConfigString,
-    PactCryptoMetadata,
     PactEngineFactory,
     PactKeyHandling,
     PactPackedEncoding,
     PactPayloadLayout,
+    PactProfile,
+    PactProfileData,
+    PactProtocolConfig,
+    PactRecipient,
     PactRuntimeConfig,
     PactSecretValidator,
 )
 
 
 def test_serializes_and_parses_canonical_config_strings() -> None:
-    config = PactRuntimeConfig(
-        message_prefix="[ENC]",
-        key_handling=PactKeyHandling.RAW_BASE64_KEY,
-        payload_layout=PactPayloadLayout.PACKED,
-        packed_encoding=PactPackedEncoding.STANDARD_NO_PADDING,
-        char_remap={"+": ".", "/": "!"},
-        crypto=PactCryptoMetadata.default_for(PactKeyHandling.RAW_BASE64_KEY),
-    ).to_protocol_config()
+    config = PactProtocolConfig(
+        message_prefix="pact1:",
+        profile=PactProfile.PACT_PSK1,
+    )
 
     serialized = PactConfigString.serialize(config)
     parsed = PactConfigString.parse(serialized)
 
     assert parsed.message_prefix == config.message_prefix
-    assert parsed.key_handling == config.key_handling
-    assert parsed.payload_layout == config.payload_layout
-    assert parsed.packed_encoding == config.packed_encoding
-    assert parsed.char_remap == config.char_remap
+    assert parsed.profile == config.profile
+    assert parsed.profile_data == config.profile_data
 
 
 def test_rejects_malformed_config_strings() -> None:
@@ -43,10 +44,8 @@ def test_rejects_malformed_config_strings() -> None:
 def test_preserves_unknown_fields_during_round_trip() -> None:
     raw = json.dumps(
         {
-            "messagePrefix": "[ENC]",
-            "keyHandling": "raw-base64-key",
-            "payloadLayout": "packed",
-            "packedEncoding": "standard-base64-no-padding",
+            "messagePrefix": "pact1:",
+            "profile": "pact-psk1",
             "futureFlag": "on",
         },
         separators=(",", ":"),
@@ -60,60 +59,132 @@ def test_preserves_unknown_fields_during_round_trip() -> None:
     assert reparsed.extra_fields["futureFlag"] == "on"
 
 
+def test_psk1_normalization_maps_to_compact_raw_key_runtime_defaults() -> None:
+    normalized = PactProtocolConfig(
+        message_prefix="pact1:",
+        profile=PactProfile.PACT_PSK1,
+    ).normalize()
+
+    assert normalized.message_prefix == "pact1:"
+    assert normalized.key_handling == PactKeyHandling.RAW_BASE64_KEY
+    assert normalized.payload_layout == PactPayloadLayout.PACKED
+    assert normalized.packed_encoding == PactPackedEncoding.ASCII85
+    assert normalized.char_remap == {}
+
+
+def test_box1_normalization_preserves_recipients_and_supports_round_trip() -> None:
+    config = PactProtocolConfig(
+        message_prefix="pact1:",
+        profile=PactProfile.PACT_BOX1,
+        profile_data=PactProfileData(
+            recipients=[
+                PactRecipient(
+                    key_id="alice-main",
+                    public_key="B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw",
+                )
+            ]
+        ),
+    )
+    runtime = config.normalize()
+
+    assert runtime.profile == PactProfile.PACT_BOX1
+    assert runtime.recipients == config.profile_data.recipients
+
+    ciphertext = PactEngineFactory.create(runtime).encrypt("hello box")
+    decrypted = PactEngineFactory.create(
+        runtime,
+        "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
+    ).decrypt(ciphertext)
+    assert decrypted == "hello box"
+
+
 def test_validates_raw_keys() -> None:
     config = PactRuntimeConfig(
         key_handling=PactKeyHandling.RAW_BASE64_KEY,
         payload_layout=PactPayloadLayout.PACKED,
         packed_encoding=PactPackedEncoding.STANDARD_NO_PADDING,
-        crypto=PactCryptoMetadata.default_for(PactKeyHandling.RAW_BASE64_KEY),
     )
 
     assert not PactSecretValidator.validate(config, "abcd").is_valid
     assert PactSecretValidator.validate(config, "AAAAAAAAAAAAAAAAAAAAAA==").is_valid
 
 
-def test_passphrase_multipart_round_trip_works() -> None:
-    engine = PactEngineFactory.create(PactRuntimeConfig(), "shared secret")
-
-    encrypted = engine.encrypt("hello world")
-
-    assert engine.matches_encrypted_payload(encrypted)
-    assert engine.decrypt(encrypted) == "hello world"
+def test_fixture_configs_round_trip() -> None:
+    for file in _fixture_files("config/valid"):
+        fixture = json.loads(file.read_text())
+        parsed = PactConfigString.parse(fixture["canonicalString"])
+        assert PactConfigString.serialize(parsed) == fixture["canonicalString"]
 
 
-def test_raw_key_packed_round_trip_with_char_remap_works() -> None:
-    engine = PactEngineFactory.create(
-        PactRuntimeConfig(
-            message_prefix="[ENC]",
-            key_handling=PactKeyHandling.RAW_BASE64_KEY,
-            payload_layout=PactPayloadLayout.PACKED,
-            packed_encoding=PactPackedEncoding.STANDARD_NO_PADDING,
-            char_remap={"+": ".", "/": "!"},
-            crypto=PactCryptoMetadata.default_for(PactKeyHandling.RAW_BASE64_KEY),
-        ),
-        "AAAAAAAAAAAAAAAAAAAAAA==",
+def test_invalid_fixture_configs_fail() -> None:
+    for file in _fixture_files("config/invalid"):
+        fixture = json.loads(file.read_text())
+        candidate = fixture.get("pactString")
+        if candidate is None:
+            candidate = "pact:v1:" + base64.urlsafe_b64encode(
+                json.dumps(fixture["json"], separators=(",", ":")).encode("utf-8")
+            ).rstrip(b"=").decode("ascii")
+        with pytest.raises(ValueError) as excinfo:
+            PactConfigString.parse(candidate)
+        assert fixture["expectedErrorContains"] in str(excinfo.value)
+
+
+def test_crypto_fixtures_decrypt_and_reencrypt_deterministically() -> None:
+    for file in _fixture_files("crypto"):
+        fixture = json.loads(file.read_text())
+        runtime = PactConfigString.parse(fixture["configString"]).normalize()
+        deterministic_inputs = fixture["deterministicInputs"]
+        iv = _decode_base64url(deterministic_inputs.get("ivBase64Url") or deterministic_inputs.get("payloadIvBase64Url"))
+        salt = (
+            _decode_base64url(deterministic_inputs["saltBase64Url"])
+            if deterministic_inputs.get("saltBase64Url")
+            else None
+        )
+        payload_key = (
+            _decode_base64url(deterministic_inputs["payloadKeyBase64Url"])
+            if deterministic_inputs.get("payloadKeyBase64Url")
+            else None
+        )
+        ephemeral_private_key = (
+            _decode_base64url(deterministic_inputs["ephemeralPrivateKeyBase64Url"])
+            if deterministic_inputs.get("ephemeralPrivateKeyBase64Url")
+            else None
+        )
+
+        engine = PactEngineFactory.create(runtime, fixture.get("secret"))
+        assert engine.decrypt(fixture["ciphertext"]) == fixture["plaintext"]
+        assert (
+            PactEngineFactory.encrypt_deterministic(
+                runtime,
+                plaintext=fixture["plaintext"],
+                secret=fixture.get("secret"),
+                iv=iv,
+                salt=salt,
+                payload_key=payload_key,
+                ephemeral_private_key=ephemeral_private_key,
+            )
+            == fixture["ciphertext"]
+        )
+        assert engine.matches_encrypted_payload(fixture["ciphertext"])
+        assert engine.find_encrypted_payloads(f"before {fixture['ciphertext']} after") == [fixture["ciphertext"]]
+
+
+def _fixture_files(relative_path: str) -> list[Path]:
+    directory = _resolve_spec_dir() / "fixtures" / relative_path
+    assert directory.is_dir(), (
+        f"PACT spec fixture directory not found at {directory}. "
+        "Set PACT_SPEC_DIR or PACT_SPEC_DIR=/path/to/pact."
     )
-
-    encrypted = engine.encrypt("Testing123")
-
-    assert encrypted.startswith("[ENC]")
-    assert engine.decrypt(encrypted) == "Testing123"
-    assert engine.find_encrypted_payloads(f"before {encrypted} after") == [encrypted]
+    return sorted(directory.glob("*.json"))
 
 
-def test_uses_dot_bang_alias_for_canonical_standard_remap() -> None:
-    config = PactRuntimeConfig(
-        key_handling=PactKeyHandling.RAW_BASE64_KEY,
-        payload_layout=PactPayloadLayout.PACKED,
-        packed_encoding=PactPackedEncoding.STANDARD_NO_PADDING,
-        char_remap={"+": ".", "/": "!"},
-        crypto=PactCryptoMetadata.default_for(PactKeyHandling.RAW_BASE64_KEY),
-    ).to_protocol_config()
+def _resolve_spec_dir() -> Path:
+    env = os.getenv("PACT_SPEC_DIR")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parents[2] / "pact"
 
-    serialized = PactConfigString.serialize(config)
-    parsed = PactConfigString.parse(serialized)
 
-    assert "dot-bang-base64-no-padding" in base64.urlsafe_b64decode(
-        serialized.removeprefix("pact:v1:") + "===",
-    ).decode("utf-8")
-    assert parsed.char_remap == {"+": ".", "/": "!"}
+def _decode_base64url(value: str) -> bytes:
+    padded = value + ("=" * ((4 - len(value) % 4) % 4))
+    return base64.urlsafe_b64decode(padded.encode("ascii"))

@@ -4,6 +4,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
+class PactProfile(str, Enum):
+    PACT_PSK1 = "PACT_PSK1"
+    PACT_BOX1 = "PACT_BOX1"
+
+
 class PactKeyHandling(str, Enum):
     PASSPHRASE_PBKDF2 = "PASSPHRASE_PBKDF2"
     RAW_BASE64_KEY = "RAW_BASE64_KEY"
@@ -17,6 +22,18 @@ class PactPayloadLayout(str, Enum):
 class PactPackedEncoding(str, Enum):
     URL_SAFE_NO_PADDING = "URL_SAFE_NO_PADDING"
     STANDARD_NO_PADDING = "STANDARD_NO_PADDING"
+    ASCII85 = "ASCII85"
+
+
+@dataclass(frozen=True)
+class PactRecipient:
+    key_id: str
+    public_key: str
+
+
+@dataclass(frozen=True)
+class PactProfileData:
+    recipients: list[PactRecipient] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -88,6 +105,8 @@ class PactCryptoMetadata:
 @dataclass(frozen=True)
 class PactRuntimeConfig:
     message_prefix: str = "pact1"
+    profile: PactProfile | None = None
+    recipients: list[PactRecipient] = field(default_factory=list)
     key_handling: PactKeyHandling = PactKeyHandling.PASSPHRASE_PBKDF2
     payload_layout: PactPayloadLayout = PactPayloadLayout.MULTIPART
     multipart_separator: str = ":"
@@ -100,57 +119,56 @@ class PactRuntimeConfig:
             object.__setattr__(self, "crypto", PactCryptoMetadata.default_for(self.key_handling))
 
     def to_protocol_config(self) -> PactProtocolConfig:
+        if self.profile == PactProfile.PACT_BOX1:
+            if not self.recipients:
+                raise ValueError("PACT box1 runtime configs require at least one recipient")
+            return PactProtocolConfig(
+                message_prefix=self.message_prefix,
+                profile=PactProfile.PACT_BOX1,
+                profile_data=PactProfileData(recipients=list(self.recipients)),
+            )
+
+        if self.key_handling != PactKeyHandling.RAW_BASE64_KEY:
+            raise ValueError("Only raw-key runtime configs can be expressed as pact-psk1")
+        if self.payload_layout != PactPayloadLayout.PACKED:
+            raise ValueError("Only packed runtime configs can be expressed as pact-psk1")
+        if self.packed_encoding != PactPackedEncoding.ASCII85:
+            raise ValueError("Only ASCII85 packed runtime configs can be expressed as pact-psk1")
+        if self.char_remap:
+            raise ValueError("PACT psk1 does not support character remapping")
+        if self.crypto != PactCryptoMetadata.default_for(PactKeyHandling.RAW_BASE64_KEY):
+            raise ValueError("Only default AES-256-GCM raw-key crypto can be expressed as pact-psk1")
+
         return PactProtocolConfig(
             message_prefix=self.message_prefix,
-            key_handling=self.key_handling,
-            payload_layout=self.payload_layout,
-            multipart_separator=self.multipart_separator,
-            packed_encoding=self.packed_encoding,
-            char_remap=dict(self.char_remap),
-            crypto=self.crypto,
+            profile=PactProfile.PACT_PSK1,
         )
 
 
 @dataclass(frozen=True)
 class PactProtocolConfig:
     message_prefix: str
-    key_handling: PactKeyHandling
-    payload_layout: PactPayloadLayout
-    multipart_separator: str | None = None
-    packed_encoding: PactPackedEncoding | None = None
-    char_remap: dict[str, str] = field(default_factory=dict)
-    crypto: PactCryptoMetadata | None = None
+    profile: PactProfile
+    profile_data: PactProfileData = field(default_factory=PactProfileData)
     extra_fields: dict[str, object] = field(default_factory=dict)
 
     def normalize(self) -> PactRuntimeConfig:
-        separator = self.multipart_separator if self.multipart_separator is not None else ":"
-        encoding = self.packed_encoding if self.packed_encoding is not None else PactPackedEncoding.URL_SAFE_NO_PADDING
         if not self.message_prefix.strip():
             raise ValueError("Message prefix cannot be blank")
-        if self.payload_layout == PactPayloadLayout.MULTIPART and separator == "":
-            raise ValueError("Multipart separator cannot be empty")
-        _validate_remap(self.char_remap)
-        normalized_crypto = PactCryptoMetadata.default_for(self.key_handling).merge_and_validate(
-            self.crypto,
-            self.key_handling,
-        )
+
+        if self.profile == PactProfile.PACT_PSK1:
+            return PactRuntimeConfig(
+                message_prefix=self.message_prefix,
+                profile=PactProfile.PACT_PSK1,
+                key_handling=PactKeyHandling.RAW_BASE64_KEY,
+                payload_layout=PactPayloadLayout.PACKED,
+                packed_encoding=PactPackedEncoding.ASCII85,
+                char_remap={},
+                crypto=PactCryptoMetadata.default_for(PactKeyHandling.RAW_BASE64_KEY),
+            )
+
         return PactRuntimeConfig(
             message_prefix=self.message_prefix,
-            key_handling=self.key_handling,
-            payload_layout=self.payload_layout,
-            multipart_separator=separator,
-            packed_encoding=encoding,
-            char_remap=dict(self.char_remap),
-            crypto=normalized_crypto,
+            profile=PactProfile.PACT_BOX1,
+            recipients=list(self.profile_data.recipients),
         )
-
-
-def _validate_remap(remap: dict[str, str]) -> None:
-    values = list(remap.values())
-    if len(set(values)) != len(values):
-        raise ValueError("Character remap values must be unique")
-    for key, value in remap.items():
-        if len(key) != 1:
-            raise ValueError("Char remap keys must be single characters")
-        if len(value) != 1:
-            raise ValueError("Char remap values must be single characters")

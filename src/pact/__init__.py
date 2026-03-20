@@ -6,7 +6,10 @@ from .models import (
     PactKeyHandling,
     PactPackedEncoding,
     PactPayloadLayout,
+    PactProfile,
+    PactProfileData,
     PactProtocolConfig,
+    PactRecipient,
     PactRuntimeConfig,
 )
 
@@ -19,7 +22,10 @@ __all__ = [
     "PactKeyHandling",
     "PactPackedEncoding",
     "PactPayloadLayout",
+    "PactProfile",
+    "PactProfileData",
     "PactProtocolConfig",
+    "PactRecipient",
     "PactRuntimeConfig",
     "PactSecretValidator",
     "ValidationResult",
