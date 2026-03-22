@@ -223,13 +223,13 @@ class _BoxPactEngine(PactEngine):
             "ciphertext": _encode_base64url_bytes(payload_ciphertext),
         }
         encoded = _encode_base64url_bytes(_compact_json(payload_json).encode("utf-8"))
-        return f"{self.config.message_prefix}{encoded}"
+        return f"{self.config.message_prefix}{_apply_char_remap(encoded, self.config.char_remap)}"
 
     def decrypt(self, payload: str) -> str:
         if not self._secret:
             raise ValueError("PACT box1 decryption requires an X25519 private key")
         private_key = _decode_x25519_private_key(self._secret)
-        parsed = _parse_box_payload(payload, self.config.message_prefix)
+        parsed = _parse_box_payload(payload, self.config.message_prefix, self.config.char_remap)
 
         ephemeral_public = _decode_x25519_public_key(parsed["ephemeralPublicKey"])
         payload_key: bytes | None = None
@@ -255,7 +255,7 @@ class _BoxPactEngine(PactEngine):
 
     def matches_encrypted_payload(self, value: str) -> bool:
         try:
-            _parse_box_payload(value, self.config.message_prefix)
+            _parse_box_payload(value, self.config.message_prefix, self.config.char_remap)
             return True
         except Exception:
             return False
@@ -473,10 +473,10 @@ def _compact_json(value: dict[str, object]) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=True)
 
 
-def _parse_box_payload(payload: str, message_prefix: str) -> dict[str, object]:
+def _parse_box_payload(payload: str, message_prefix: str, remap: dict[str, str]) -> dict[str, object]:
     if not payload.startswith(message_prefix):
         raise ValueError("Unsupported payload format")
-    encoded = payload.removeprefix(message_prefix)
+    encoded = _invert_char_remap(payload.removeprefix(message_prefix), remap)
     root = json.loads(_decode_base64url_bytes(encoded).decode("utf-8"))
     if root.get("profile") != "pact-box1":
         raise ValueError("Unsupported payload format")

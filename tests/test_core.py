@@ -19,6 +19,7 @@ from pact import (
     PactRecipient,
     PactRuntimeConfig,
     PactSecretValidator,
+    PactTransportData,
 )
 
 
@@ -34,6 +35,7 @@ def test_serializes_and_parses_canonical_config_strings() -> None:
     assert parsed.message_prefix == config.message_prefix
     assert parsed.profile == config.profile
     assert parsed.profile_data == config.profile_data
+    assert parsed.transport_data == config.transport_data
 
 
 def test_rejects_malformed_config_strings() -> None:
@@ -70,6 +72,35 @@ def test_psk1_normalization_maps_to_compact_raw_key_runtime_defaults() -> None:
     assert normalized.payload_layout == PactPayloadLayout.PACKED
     assert normalized.packed_encoding == PactPackedEncoding.ASCII85
     assert normalized.char_remap == {}
+
+
+def test_psk2_normalization_maps_to_plain_base64_raw_key_runtime_defaults() -> None:
+    normalized = PactProtocolConfig(
+        message_prefix="[ENC]",
+        profile=PactProfile.PACT_PSK2,
+    ).normalize()
+
+    assert normalized.message_prefix == "[ENC]"
+    assert normalized.key_handling == PactKeyHandling.RAW_BASE64_KEY
+    assert normalized.payload_layout == PactPayloadLayout.PACKED
+    assert normalized.packed_encoding == PactPackedEncoding.STANDARD_NO_PADDING
+    assert normalized.char_remap == {}
+
+
+def test_transport_remap_lives_outside_the_profile() -> None:
+    config = PactProtocolConfig(
+        message_prefix="[ENC]",
+        profile=PactProfile.PACT_PSK2,
+        transport_data=PactTransportData(
+            char_remap={"+": ".", "/": "!"},
+        ),
+    )
+
+    normalized = config.normalize()
+
+    assert normalized.profile == PactProfile.PACT_PSK2
+    assert normalized.char_remap == {"+": ".", "/": "!"}
+    assert normalized.to_protocol_config() == config
 
 
 def test_box1_normalization_preserves_recipients_and_supports_round_trip() -> None:

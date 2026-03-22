@@ -6,6 +6,7 @@ from enum import Enum
 
 class PactProfile(str, Enum):
     PACT_PSK1 = "PACT_PSK1"
+    PACT_PSK2 = "PACT_PSK2"
     PACT_BOX1 = "PACT_BOX1"
 
 
@@ -34,6 +35,11 @@ class PactRecipient:
 @dataclass(frozen=True)
 class PactProfileData:
     recipients: list[PactRecipient] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PactTransportData:
+    char_remap: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -126,23 +132,34 @@ class PactRuntimeConfig:
                 message_prefix=self.message_prefix,
                 profile=PactProfile.PACT_BOX1,
                 profile_data=PactProfileData(recipients=list(self.recipients)),
+                transport_data=PactTransportData(char_remap=dict(self.char_remap)),
             )
 
         if self.key_handling != PactKeyHandling.RAW_BASE64_KEY:
-            raise ValueError("Only raw-key runtime configs can be expressed as pact-psk1")
+            raise ValueError("Only raw-key runtime configs can be expressed as PACT shared-secret profiles")
         if self.payload_layout != PactPayloadLayout.PACKED:
-            raise ValueError("Only packed runtime configs can be expressed as pact-psk1")
-        if self.packed_encoding != PactPackedEncoding.ASCII85:
-            raise ValueError("Only ASCII85 packed runtime configs can be expressed as pact-psk1")
-        if self.char_remap:
-            raise ValueError("PACT psk1 does not support character remapping")
+            raise ValueError("Only packed runtime configs can be expressed as PACT shared-secret profiles")
         if self.crypto != PactCryptoMetadata.default_for(PactKeyHandling.RAW_BASE64_KEY):
-            raise ValueError("Only default AES-256-GCM raw-key crypto can be expressed as pact-psk1")
+            raise ValueError("Only default AES-256-GCM raw-key crypto can be expressed as PACT shared-secret profiles")
 
-        return PactProtocolConfig(
-            message_prefix=self.message_prefix,
-            profile=PactProfile.PACT_PSK1,
-        )
+        if self.packed_encoding == PactPackedEncoding.ASCII85:
+            return PactProtocolConfig(
+                message_prefix=self.message_prefix,
+                profile=PactProfile.PACT_PSK1,
+                transport_data=PactTransportData(char_remap=dict(self.char_remap)),
+            )
+        if self.packed_encoding == PactPackedEncoding.STANDARD_NO_PADDING and not self.char_remap:
+            return PactProtocolConfig(
+                message_prefix=self.message_prefix,
+                profile=PactProfile.PACT_PSK2,
+            )
+        if self.packed_encoding == PactPackedEncoding.STANDARD_NO_PADDING:
+            return PactProtocolConfig(
+                message_prefix=self.message_prefix,
+                profile=PactProfile.PACT_PSK2,
+                transport_data=PactTransportData(char_remap=dict(self.char_remap)),
+            )
+        raise ValueError("Runtime config does not match a standard PACT shared-secret profile")
 
 
 @dataclass(frozen=True)
@@ -150,11 +167,13 @@ class PactProtocolConfig:
     message_prefix: str
     profile: PactProfile
     profile_data: PactProfileData = field(default_factory=PactProfileData)
+    transport_data: PactTransportData = field(default_factory=PactTransportData)
     extra_fields: dict[str, object] = field(default_factory=dict)
 
     def normalize(self) -> PactRuntimeConfig:
         if not self.message_prefix.strip():
             raise ValueError("Message prefix cannot be blank")
+        _validate_remap(self.transport_data.char_remap)
 
         if self.profile == PactProfile.PACT_PSK1:
             return PactRuntimeConfig(
@@ -163,7 +182,18 @@ class PactProtocolConfig:
                 key_handling=PactKeyHandling.RAW_BASE64_KEY,
                 payload_layout=PactPayloadLayout.PACKED,
                 packed_encoding=PactPackedEncoding.ASCII85,
-                char_remap={},
+                char_remap=dict(self.transport_data.char_remap),
+                crypto=PactCryptoMetadata.default_for(PactKeyHandling.RAW_BASE64_KEY),
+            )
+
+        if self.profile == PactProfile.PACT_PSK2:
+            return PactRuntimeConfig(
+                message_prefix=self.message_prefix,
+                profile=PactProfile.PACT_PSK2,
+                key_handling=PactKeyHandling.RAW_BASE64_KEY,
+                payload_layout=PactPayloadLayout.PACKED,
+                packed_encoding=PactPackedEncoding.STANDARD_NO_PADDING,
+                char_remap=dict(self.transport_data.char_remap),
                 crypto=PactCryptoMetadata.default_for(PactKeyHandling.RAW_BASE64_KEY),
             )
 
@@ -171,4 +201,16 @@ class PactProtocolConfig:
             message_prefix=self.message_prefix,
             profile=PactProfile.PACT_BOX1,
             recipients=list(self.profile_data.recipients),
+            char_remap=dict(self.transport_data.char_remap),
         )
+
+
+def _validate_remap(remap: dict[str, str]) -> None:
+    for key, value in remap.items():
+        if len(key) != 1:
+            raise ValueError("transportData.charRemap key must be a single character")
+        if len(value) != 1:
+            raise ValueError("transportData.charRemap value must be a single character")
+    values = list(remap.values())
+    if len(values) != len(set(values)):
+        raise ValueError("Character remap values must be unique")

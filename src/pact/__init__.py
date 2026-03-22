@@ -11,6 +11,7 @@ from .models import (
     PactProtocolConfig,
     PactRecipient,
     PactRuntimeConfig,
+    PactTransportData,
 )
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "PactProtocolConfig",
     "PactRecipient",
     "PactRuntimeConfig",
+    "PactTransportData",
     "PactSecretValidator",
     "ValidationResult",
 ]
