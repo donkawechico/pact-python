@@ -2,6 +2,10 @@
 
 `pact-python` is a Python implementation of **PACT**: **Portable Application-layer Cryptography Template**.
 
+PACT is an experimental standard I am developing for sharing encryption
+profiles and metadata easily between applications, for use in custom
+encryption layers on top of existing apps. It is a work in progress.
+
 This library provides:
 
 - PACT config-string parsing and serialization
@@ -12,7 +16,8 @@ This library provides:
 
 ## Status
 
-This repository is the Python implementation track for the PACT specification.
+PACT is a work in progress, and this repository is the Python implementation
+track for that evolving standard.
 
 ## Install
 
