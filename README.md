@@ -36,15 +36,14 @@ pytest
 - `PactEngine`
 - `PactSecretValidator`
 
-## Discord Bot Fit
+## Typical Usage
 
-This package is protocol-focused rather than Discord-specific. A bot can use it to:
+Applications can use `pact-python` to:
 
-- load a pasted PACT config string
-- validate and normalize that config
-- encrypt outgoing payloads
-- detect and decrypt incoming payloads
-- generate a canonical PACT config string for copy/paste into Android or other clients
+- parse or generate a PACT config string
+- validate and normalize protocol settings
+- create an encryption/decryption engine from a shared secret
+- encrypt outbound payloads and decrypt inbound payloads
 
 ## Example
 
