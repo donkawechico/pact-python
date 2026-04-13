@@ -1,5 +1,5 @@
 from .config_string import PactConfigString
-from .engine import PactEngine, PactEngineFactory, PactSecretValidator, ValidationResult
+from .engine import PactEngine, PactEngineFactory, PactKeyPair, PactSecretGenerator, PactSecretValidator, ValidationResult
 from .models import (
     PactCryptoMetadata,
     PactKdfMetadata,
@@ -19,6 +19,7 @@ __all__ = [
     "PactCryptoMetadata",
     "PactEngine",
     "PactEngineFactory",
+    "PactKeyPair",
     "PactKdfMetadata",
     "PactKeyHandling",
     "PactPackedEncoding",
@@ -29,6 +30,7 @@ __all__ = [
     "PactRecipient",
     "PactRuntimeConfig",
     "PactTransportData",
+    "PactSecretGenerator",
     "PactSecretValidator",
     "ValidationResult",
 ]

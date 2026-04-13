@@ -21,6 +21,10 @@ class PactConfigString:
         root = json.loads(_decode_url_safe(encoded_body))
 
         message_prefix = _required_string(root, "messagePrefix", error_message="Missing required field: messagePrefix")
+        if message_prefix == "":
+            raise ValueError("messagePrefix must not be empty")
+        if "[" in message_prefix or "]" in message_prefix:
+            raise ValueError("messagePrefix must not contain brackets")
         profile = cls._parse_profile(_required_string(root, "profile", error_message="Missing required field: profile"))
         profile_data = cls._parse_profile_data(profile, root.get("profileData"))
         transport_data = cls._parse_transport_data(root.get("transportData"))
@@ -54,22 +58,11 @@ class PactConfigString:
 
     @staticmethod
     def _parse_profile(value: str) -> PactProfile:
-        normalized = value.lower()
-        if normalized == "pact-psk1":
-            return PactProfile.PACT_PSK1
-        if normalized == "pact-psk2":
-            return PactProfile.PACT_PSK2
-        if normalized == "pact-box1":
-            return PactProfile.PACT_BOX1
-        raise ValueError(f"Unknown profile: {value}")
+        return PactProfile.from_wire_name(value)
 
     @staticmethod
     def _serialize_profile(value: PactProfile) -> str:
-        if value == PactProfile.PACT_PSK1:
-            return "pact-psk1"
-        if value == PactProfile.PACT_PSK2:
-            return "pact-psk2"
-        return "pact-box1"
+        return value.wire_name
 
     @classmethod
     def _parse_profile_data(cls, profile: PactProfile, value: Any) -> PactProfileData:

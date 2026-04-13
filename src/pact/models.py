@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 
@@ -8,6 +8,25 @@ class PactProfile(str, Enum):
     PACT_PSK1 = "PACT_PSK1"
     PACT_PSK2 = "PACT_PSK2"
     PACT_BOX1 = "PACT_BOX1"
+
+    @classmethod
+    def from_wire_name(cls, value: str) -> PactProfile:
+        normalized = value.lower()
+        if normalized == "pact-psk1":
+            return cls.PACT_PSK1
+        if normalized == "pact-psk2":
+            return cls.PACT_PSK2
+        if normalized == "pact-box1":
+            return cls.PACT_BOX1
+        raise ValueError(f"Unknown profile: {value}")
+
+    @property
+    def wire_name(self) -> str:
+        if self == PactProfile.PACT_PSK1:
+            return "pact-psk1"
+        if self == PactProfile.PACT_PSK2:
+            return "pact-psk2"
+        return "pact-box1"
 
 
 class PactKeyHandling(str, Enum):
@@ -171,8 +190,10 @@ class PactProtocolConfig:
     extra_fields: dict[str, object] = field(default_factory=dict)
 
     def normalize(self) -> PactRuntimeConfig:
-        if not self.message_prefix.strip():
-            raise ValueError("Message prefix cannot be blank")
+        if not self.message_prefix:
+            raise ValueError("messagePrefix must not be empty")
+        if "[" in self.message_prefix or "]" in self.message_prefix:
+            raise ValueError("messagePrefix must not contain brackets")
         _validate_remap(self.transport_data.char_remap)
 
         if self.profile == PactProfile.PACT_PSK1:
@@ -203,6 +224,26 @@ class PactProtocolConfig:
             recipients=list(self.profile_data.recipients),
             char_remap=dict(self.transport_data.char_remap),
         )
+
+    def with_transport(self, message_prefix: str | None = None, char_remap: dict[str, str] | None = None) -> PactProtocolConfig:
+        updated = replace(
+            self,
+            message_prefix=self.message_prefix if message_prefix is None else message_prefix,
+            transport_data=self.transport_data if char_remap is None else PactTransportData(char_remap=dict(char_remap)),
+        )
+        updated.normalize()
+        return updated
+
+    def with_profile(self, profile: PactProfile | str, char_remap: dict[str, str] | None = None) -> PactProtocolConfig:
+        updated_profile = PactProfile.from_wire_name(profile) if isinstance(profile, str) else profile
+        updates: dict[str, object] = {"profile": updated_profile}
+        if updated_profile in {PactProfile.PACT_PSK1, PactProfile.PACT_PSK2}:
+            updates["profile_data"] = PactProfileData()
+        if char_remap is not None:
+            updates["transport_data"] = PactTransportData(char_remap=dict(char_remap))
+        updated = replace(self, **updates)
+        updated.normalize()
+        return updated
 
 
 def _validate_remap(remap: dict[str, str]) -> None:

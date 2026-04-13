@@ -6,7 +6,7 @@ import os
 import re
 from dataclasses import dataclass
 
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -24,6 +24,9 @@ from .models import (
 
 class PactEngine:
     def encrypt(self, plaintext: str) -> str:
+        raise NotImplementedError
+
+    def encrypt_self_describing(self, plaintext: str) -> str:
         raise NotImplementedError
 
     def decrypt(self, payload: str) -> str:
@@ -58,6 +61,9 @@ class _DefaultPactEngine(PactEngine):
         iv = _random_bytes(self.config.crypto.iv_bytes if self.config.crypto else 12)
         return self.encrypt_deterministic(plaintext, iv=iv)
 
+    def encrypt_self_describing(self, plaintext: str) -> str:
+        return _to_self_describing(self.encrypt(plaintext), self.config)
+
     def encrypt_deterministic(self, plaintext: str, iv: bytes, salt: bytes | None = None) -> str:
         if self.config.key_handling == PactKeyHandling.PASSPHRASE_PBKDF2:
             if salt is None:
@@ -77,7 +83,7 @@ class _DefaultPactEngine(PactEngine):
                         _encode_segment(ciphertext, self.config.packed_encoding, self.config.char_remap),
                     ]
                 )
-            return self.config.message_prefix + _encode_segment(
+            return _wire_prefix(self.config.message_prefix) + _encode_segment(
                 salt + iv + ciphertext,
                 self.config.packed_encoding,
                 self.config.char_remap,
@@ -92,9 +98,11 @@ class _DefaultPactEngine(PactEngine):
                     _encode_segment(ciphertext, self.config.packed_encoding, self.config.char_remap),
                 ]
             )
-        return self.config.message_prefix + _encode_segment(iv + ciphertext, self.config.packed_encoding, self.config.char_remap)
+        return _wire_prefix(self.config.message_prefix) + _encode_segment(iv + ciphertext, self.config.packed_encoding, self.config.char_remap)
 
     def decrypt(self, payload: str) -> str:
+        if payload.startswith(_SELF_DESCRIBING_PREFIX):
+            return _decrypt_self_describing(payload, self._secret)
         if self.config.payload_layout == PactPayloadLayout.MULTIPART:
             return self._decrypt_multipart(payload)
         return self._decrypt_packed(payload)
@@ -109,9 +117,13 @@ class _DefaultPactEngine(PactEngine):
                     and parts[0] == self.config.message_prefix
                     and all(_decode_segment(part, self.config.packed_encoding, self.config.char_remap) is not None for part in parts[1:])
                 )
-            encoded = value.removeprefix(self.config.message_prefix)
+            if value.startswith(_SELF_DESCRIBING_PREFIX):
+                _decrypt_self_describing(value, self._secret)
+                return True
+            prefix = _wire_prefix(self.config.message_prefix)
+            encoded = value.removeprefix(prefix)
             return (
-                value.startswith(self.config.message_prefix)
+                value.startswith(prefix)
                 and encoded != ""
                 and _decode_segment(encoded, self.config.packed_encoding, self.config.char_remap) is not None
             )
@@ -142,9 +154,10 @@ class _DefaultPactEngine(PactEngine):
         return _decrypt_text_with_key(ciphertext, key, iv)
 
     def _decrypt_packed(self, payload: str) -> str:
-        if not payload.startswith(self.config.message_prefix):
+        prefix = _wire_prefix(self.config.message_prefix)
+        if not payload.startswith(prefix):
             raise ValueError("Unsupported payload format")
-        packed_bytes = _require_decoded(payload.removeprefix(self.config.message_prefix), self.config)
+        packed_bytes = _require_decoded(payload.removeprefix(prefix), self.config)
         if self.config.key_handling == PactKeyHandling.PASSPHRASE_PBKDF2:
             salt_bytes = self.config.crypto.kdf.salt_bytes if self.config.crypto and self.config.crypto.kdf else 16
             iv_bytes = self.config.crypto.iv_bytes if self.config.crypto else 12
@@ -182,6 +195,9 @@ class _BoxPactEngine(PactEngine):
             payload_iv=payload_iv,
             ephemeral_private_key=ephemeral_private_key,
         )
+
+    def encrypt_self_describing(self, plaintext: str) -> str:
+        return _to_self_describing(self.encrypt(plaintext), self.config)
 
     def encrypt_deterministic(
         self,
@@ -223,13 +239,15 @@ class _BoxPactEngine(PactEngine):
             "ciphertext": _encode_base64url_bytes(payload_ciphertext),
         }
         encoded = _encode_base64url_bytes(_compact_json(payload_json).encode("utf-8"))
-        return f"{self.config.message_prefix}{_apply_char_remap(encoded, self.config.char_remap)}"
+        return f"{_wire_prefix(self.config.message_prefix)}{_apply_char_remap(encoded, self.config.char_remap)}"
 
     def decrypt(self, payload: str) -> str:
         if not self._secret:
             raise ValueError("PACT box1 decryption requires an X25519 private key")
+        if payload.startswith(_SELF_DESCRIBING_PREFIX):
+            return _decrypt_self_describing(payload, self._secret)
         private_key = _decode_x25519_private_key(self._secret)
-        parsed = _parse_box_payload(payload, self.config.message_prefix, self.config.char_remap)
+        parsed = _parse_box_payload(payload, _wire_prefix(self.config.message_prefix), self.config.char_remap)
 
         ephemeral_public = _decode_x25519_public_key(parsed["ephemeralPublicKey"])
         payload_key: bytes | None = None
@@ -255,7 +273,10 @@ class _BoxPactEngine(PactEngine):
 
     def matches_encrypted_payload(self, value: str) -> bool:
         try:
-            _parse_box_payload(value, self.config.message_prefix, self.config.char_remap)
+            if value.startswith(_SELF_DESCRIBING_PREFIX):
+                _decrypt_self_describing(value, self._secret)
+            else:
+                _parse_box_payload(value, _wire_prefix(self.config.message_prefix), self.config.char_remap)
             return True
         except Exception:
             return False
@@ -273,6 +294,14 @@ class PactEngineFactory:
         return _DefaultPactEngine(runtime_config, secret or "")
 
     @staticmethod
+    def encrypt_self_describing(
+        config: PactProtocolConfig | PactRuntimeConfig,
+        plaintext: str,
+        secret: str | None = None,
+    ) -> str:
+        return PactEngineFactory.create(config, secret).encrypt_self_describing(plaintext)
+
+    @staticmethod
     def encrypt_deterministic(
         runtime_config: PactRuntimeConfig,
         plaintext: str,
@@ -281,23 +310,61 @@ class PactEngineFactory:
         salt: bytes | None = None,
         payload_key: bytes | None = None,
         ephemeral_private_key: bytes | None = None,
+        self_describing: bool = False,
     ) -> str:
         validation = PactSecretValidator.validate(runtime_config, secret)
         if not validation.is_valid:
             raise ValueError(validation.message or "Invalid secret")
         if runtime_config.profile == PactProfile.PACT_BOX1:
-            return _BoxPactEngine(runtime_config, secret).encrypt_deterministic(
+            ciphertext = _BoxPactEngine(runtime_config, secret).encrypt_deterministic(
                 plaintext,
                 payload_key=payload_key or b"",
                 payload_iv=iv or b"",
                 ephemeral_private_key=ephemeral_private_key or b"",
             )
+            return _to_self_describing(ciphertext, runtime_config) if self_describing else ciphertext
         if iv is None:
             raise ValueError("Deterministic encrypt requires iv")
-        return _DefaultPactEngine(runtime_config, secret or "").encrypt_deterministic(
+        ciphertext = _DefaultPactEngine(runtime_config, secret or "").encrypt_deterministic(
             plaintext,
             iv=iv,
             salt=salt,
+        )
+        return _to_self_describing(ciphertext, runtime_config) if self_describing else ciphertext
+
+
+@dataclass(frozen=True)
+class PactKeyPair:
+    public_key: str
+    private_key: str
+
+
+class PactSecretGenerator:
+    @staticmethod
+    def generate_shared_secret(config: PactProtocolConfig | PactRuntimeConfig) -> str:
+        runtime_config = config.normalize() if isinstance(config, PactProtocolConfig) else config
+        if runtime_config.key_handling != PactKeyHandling.RAW_BASE64_KEY:
+            raise ValueError("Shared secret generation is only supported for raw-key profiles")
+        return _encode_base64url_bytes(_random_bytes(32))
+
+    @staticmethod
+    def generate_key_pair() -> PactKeyPair:
+        private_key = x25519.X25519PrivateKey.generate()
+        public_key = private_key.public_key()
+        return PactKeyPair(
+            public_key=_encode_base64url_bytes(
+                public_key.public_bytes(
+                    encoding=serialization.Encoding.Raw,
+                    format=serialization.PublicFormat.Raw,
+                )
+            ),
+            private_key=_encode_base64url_bytes(
+                private_key.private_bytes(
+                    encoding=serialization.Encoding.Raw,
+                    format=serialization.PrivateFormat.Raw,
+                    encryption_algorithm=serialization.NoEncryption(),
+                )
+            ),
         )
 
 
@@ -348,6 +415,144 @@ def _candidate_tokens(token: str) -> list[str]:
     trimmed = token.strip()
     trailing = trimmed.rstrip(".,!?)]}\"'")
     return [candidate for candidate in dict.fromkeys([trimmed, trailing]) if candidate]
+
+
+_SELF_DESCRIBING_PREFIX = "[pact]:v1:"
+
+
+def _wire_prefix(message_prefix: str) -> str:
+    return f"[{message_prefix}]"
+
+
+@dataclass(frozen=True)
+class _SelfDescribingPreamble:
+    profile: PactProfile
+    remap: dict[str, str]
+    encoded_payload: str
+
+
+def _parse_self_describing_preamble(message: str) -> _SelfDescribingPreamble:
+    parts = message.split(":", 4)
+    if len(parts) != 5:
+        raise ValueError("Self-describing message must contain four preamble delimiters")
+    tag, version, profile_id, remap_spec, encoded_payload = parts
+    if tag != "[pact]" or version != "v1":
+        raise ValueError("Unsupported self-describing message format")
+    if profile_id == "1":
+        profile = PactProfile.PACT_PSK1
+    elif profile_id == "2":
+        profile = PactProfile.PACT_PSK2
+    elif profile_id == "3":
+        profile = PactProfile.PACT_BOX1
+    else:
+        raise ValueError(f"Unknown profile ID: {profile_id}")
+    return _SelfDescribingPreamble(
+        profile=profile,
+        remap=_parse_remap_spec(remap_spec, profile),
+        encoded_payload=encoded_payload,
+    )
+
+
+def _parse_remap_spec(value: str, profile: PactProfile) -> dict[str, str]:
+    if len(value) % 3 != 0:
+        raise ValueError("Compact remap spec length must be a multiple of 3")
+    remap: dict[str, str] = {}
+    destinations: set[str] = set()
+    alphabet = _profile_payload_alphabet(profile)
+    for index in range(0, len(value), 3):
+        source_hex = value[index:index + 2]
+        destination = value[index + 2]
+        if not re.fullmatch(r"[0-9A-F]{2}", source_hex):
+            raise ValueError("Malformed remap source hex")
+        source = chr(int(source_hex, 16))
+        if source in remap:
+            raise ValueError("Duplicate remap source")
+        if destination in destinations:
+            raise ValueError("Duplicate remap destination")
+        if destination == ":":
+            raise ValueError("Compact remap destination must not be ':'")
+        if source not in alphabet:
+            raise ValueError("Remap source outside profile alphabet")
+        remap[source] = destination
+        destinations.add(destination)
+    return remap
+
+
+def _profile_payload_alphabet(profile: PactProfile) -> set[str]:
+    if profile == PactProfile.PACT_PSK1:
+        return {chr(value) for value in range(33, 118)}
+    if profile == PactProfile.PACT_PSK2:
+        return set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+    return set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+
+
+def _remap_spec(remap: dict[str, str], profile: PactProfile) -> str:
+    _parse_remap_spec("".join(f"{ord(source):02X}{dest}" for source, dest in sorted(remap.items())), profile)
+    return "".join(f"{ord(source):02X}{remap[source]}" for source in sorted(remap))
+
+
+def _to_self_describing(ciphertext: str, config: PactRuntimeConfig) -> str:
+    prefix = _wire_prefix(config.message_prefix)
+    if not ciphertext.startswith(prefix):
+        raise ValueError("Unsupported payload format")
+    profile_id = _profile_id(config.profile)
+    return f"[pact]:v1:{profile_id}:{_remap_spec(config.char_remap, config.profile or PactProfile.PACT_PSK1)}:{ciphertext.removeprefix(prefix)}"
+
+
+def _profile_id(profile: PactProfile | None) -> str:
+    if profile == PactProfile.PACT_PSK1:
+        return "1"
+    if profile == PactProfile.PACT_PSK2:
+        return "2"
+    if profile == PactProfile.PACT_BOX1:
+        return "3"
+    raise ValueError("Self-describing messages require a standard profile")
+
+
+def _decrypt_self_describing(payload: str, secret: str) -> str:
+    preamble = _parse_self_describing_preamble(payload)
+    if preamble.profile == PactProfile.PACT_BOX1:
+        return _decrypt_self_describing_box(preamble, secret)
+
+    encoding = PactPackedEncoding.ASCII85 if preamble.profile == PactProfile.PACT_PSK1 else PactPackedEncoding.STANDARD_NO_PADDING
+    packed_bytes = _decode_segment(preamble.encoded_payload, encoding, preamble.remap)
+    if packed_bytes is None:
+        raise ValueError("Unsupported payload format")
+    iv_bytes = 12
+    if len(packed_bytes) <= iv_bytes:
+        raise ValueError("Packed payload too short")
+    iv = packed_bytes[:iv_bytes]
+    ciphertext = packed_bytes[iv_bytes:]
+    return _decrypt_text_with_key(ciphertext, _decode_raw_aes_key(secret), iv)
+
+
+def _decrypt_self_describing_box(preamble: _SelfDescribingPreamble, secret: str) -> str:
+    if not secret:
+        raise ValueError("PACT box1 decryption requires an X25519 private key")
+    private_key = _decode_x25519_private_key(secret)
+    encoded = _invert_char_remap(preamble.encoded_payload, preamble.remap)
+    parsed = _parse_box_payload(encoded, "", {})
+
+    ephemeral_public = _decode_x25519_public_key(parsed["ephemeralPublicKey"])
+    payload_key: bytes | None = None
+    for recipient in parsed["recipients"]:
+        try:
+            wrap_key, wrap_iv = _derive_box_wrap_key(private_key, ephemeral_public)
+            payload_key = _decrypt_bytes_with_key(
+                _decode_base64url_bytes(recipient["wrappedKey"]),
+                wrap_key,
+                wrap_iv,
+            )
+            break
+        except Exception:
+            continue
+    if payload_key is None:
+        raise ValueError("No wrapped payload key could be decrypted with the provided private key")
+    return _decrypt_text_with_key(
+        _decode_base64url_bytes(parsed["ciphertext"]),
+        payload_key,
+        _decode_base64url_bytes(parsed["payloadIv"]),
+    )
 
 
 def _derive_key(passphrase: str, salt: bytes, iterations: int) -> bytes:
