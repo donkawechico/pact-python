@@ -44,6 +44,17 @@ def test_rejects_malformed_config_strings() -> None:
         PactConfigString.parse("not-a-config")
 
 
+def test_rejects_reserved_pact_message_prefix() -> None:
+    raw = json.dumps({"messagePrefix": "pact", "profile": "pact-psk1"}, separators=(",", ":"))
+    encoded = base64.urlsafe_b64encode(raw.encode("utf-8")).rstrip(b"=").decode("ascii")
+
+    with pytest.raises(ValueError, match="messagePrefix must not be pact"):
+        PactConfigString.parse(f"pact:v1:{encoded}")
+
+    with pytest.raises(ValueError, match="messagePrefix must not be pact"):
+        PactProtocolConfig(message_prefix="pact", profile=PactProfile.PACT_PSK1).normalize()
+
+
 def test_preserves_unknown_fields_during_round_trip() -> None:
     raw = json.dumps(
         {

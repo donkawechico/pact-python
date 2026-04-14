@@ -23,6 +23,8 @@ class PactConfigString:
         message_prefix = _required_string(root, "messagePrefix", error_message="Missing required field: messagePrefix")
         if message_prefix == "":
             raise ValueError("messagePrefix must not be empty")
+        if message_prefix == "pact":
+            raise ValueError("messagePrefix must not be pact")
         if "[" in message_prefix or "]" in message_prefix:
             raise ValueError("messagePrefix must not contain brackets")
         profile = cls._parse_profile(_required_string(root, "profile", error_message="Missing required field: profile"))

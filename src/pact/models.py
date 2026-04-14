@@ -192,6 +192,8 @@ class PactProtocolConfig:
     def normalize(self) -> PactRuntimeConfig:
         if not self.message_prefix:
             raise ValueError("messagePrefix must not be empty")
+        if self.message_prefix == "pact":
+            raise ValueError("messagePrefix must not be pact")
         if "[" in self.message_prefix or "]" in self.message_prefix:
             raise ValueError("messagePrefix must not contain brackets")
         _validate_remap(self.transport_data.char_remap)
