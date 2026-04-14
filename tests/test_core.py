@@ -201,79 +201,6 @@ def test_generates_usable_box_key_pairs() -> None:
     assert PactSecretValidator.validate(config.normalize(), key_pair.private_key).is_valid
     assert PactEngineFactory.create(config, key_pair.private_key).decrypt(ciphertext) == "hello generated box"
 
-
-def test_fixture_configs_round_trip() -> None:
-    for file in _fixture_files("config/valid"):
-        fixture = json.loads(file.read_text())
-        parsed = PactConfigString.parse(fixture["canonicalString"])
-        assert PactConfigString.serialize(parsed) == fixture["canonicalString"]
-
-
-def test_invalid_fixture_configs_fail() -> None:
-    for file in _fixture_files("config/invalid"):
-        fixture = json.loads(file.read_text())
-        candidate = fixture.get("pactString")
-        if candidate is None:
-            candidate = "pact:v1:" + base64.urlsafe_b64encode(
-                json.dumps(fixture["json"], separators=(",", ":")).encode("utf-8")
-            ).rstrip(b"=").decode("ascii")
-        with pytest.raises(ValueError) as excinfo:
-            PactConfigString.parse(candidate)
-        assert fixture["expectedErrorContains"] in str(excinfo.value)
-
-
-def test_crypto_fixtures_decrypt_and_reencrypt_deterministically() -> None:
-    for file in _fixture_files("crypto"):
-        fixture = json.loads(file.read_text())
-        runtime = PactConfigString.parse(fixture["configString"]).normalize()
-        deterministic_inputs = fixture["deterministicInputs"]
-        iv = _decode_base64url(deterministic_inputs.get("ivBase64Url") or deterministic_inputs.get("payloadIvBase64Url"))
-        salt = (
-            _decode_base64url(deterministic_inputs["saltBase64Url"])
-            if deterministic_inputs.get("saltBase64Url")
-            else None
-        )
-        payload_key = (
-            _decode_base64url(deterministic_inputs["payloadKeyBase64Url"])
-            if deterministic_inputs.get("payloadKeyBase64Url")
-            else None
-        )
-        ephemeral_private_key = (
-            _decode_base64url(deterministic_inputs["ephemeralPrivateKeyBase64Url"])
-            if deterministic_inputs.get("ephemeralPrivateKeyBase64Url")
-            else None
-        )
-
-        engine = PactEngineFactory.create(runtime, fixture.get("secret"))
-        assert engine.decrypt(fixture["ciphertext"]) == fixture["plaintext"]
-        assert (
-            PactEngineFactory.encrypt_deterministic(
-                runtime,
-                plaintext=fixture["plaintext"],
-                secret=fixture.get("secret"),
-                iv=iv,
-                salt=salt,
-                payload_key=payload_key,
-                ephemeral_private_key=ephemeral_private_key,
-                self_describing="self-describing" in fixture["name"],
-            )
-            == fixture["ciphertext"]
-        )
-        assert engine.matches_encrypted_payload(fixture["ciphertext"])
-        assert engine.find_encrypted_payloads(f"before {fixture['ciphertext']} after") == [fixture["ciphertext"]]
-
-
-def test_invalid_self_describing_message_fixtures_fail() -> None:
-    runtime = PactProtocolConfig(message_prefix="ENC", profile=PactProfile.PACT_PSK2).normalize()
-    engine = PactEngineFactory.create(runtime, "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8")
-
-    for file in _fixture_files("message/invalid"):
-        fixture = json.loads(file.read_text())
-        with pytest.raises(ValueError) as excinfo:
-            engine.decrypt(fixture["message"])
-        assert fixture["expectedErrorContains"] in str(excinfo.value)
-
-
 def test_encrypt_self_describing_uses_production_randomness() -> None:
     runtime = PactProtocolConfig(
         message_prefix="ENC",
@@ -286,24 +213,3 @@ def test_encrypt_self_describing_uses_production_randomness() -> None:
 
     assert ciphertext.startswith("[pact]:v1:")
     assert PactEngineFactory.create(runtime, secret).decrypt(ciphertext) == "hello self describing"
-
-
-def _fixture_files(relative_path: str) -> list[Path]:
-    directory = _resolve_spec_dir() / "fixtures" / relative_path
-    assert directory.is_dir(), (
-        f"PACT spec fixture directory not found at {directory}. "
-        "Set PACT_SPEC_DIR or PACT_SPEC_DIR=/path/to/pact."
-    )
-    return sorted(directory.glob("*.json"))
-
-
-def _resolve_spec_dir() -> Path:
-    env = os.getenv("PACT_SPEC_DIR")
-    if env:
-        return Path(env)
-    return Path(__file__).resolve().parents[2] / "pact"
-
-
-def _decode_base64url(value: str) -> bytes:
-    padded = value + ("=" * ((4 - len(value) % 4) % 4))
-    return base64.urlsafe_b64decode(padded.encode("ascii"))

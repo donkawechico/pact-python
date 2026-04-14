@@ -34,15 +34,15 @@ jobs:
         with:
           repository: ${{ inputs.pact_repo }}
           ref: ${{ inputs.pact_sha }}
-          path: .upstream/pact
+          path: .sync-inputs/pact
           fetch-depth: 1
           persist-credentials: false
 
       - name: Verify upstream snapshot
         run: |
-          test -f .upstream/pact/SPEC.md
-          test -d .upstream/pact/fixtures
-          actual_sha="$(git -C .upstream/pact rev-parse HEAD)"
+          test -f .sync-inputs/pact/SPEC.md
+          test -d .sync-inputs/pact/fixtures
+          actual_sha="$(git -C .sync-inputs/pact rev-parse HEAD)"
           echo "Expected SHA: ${{ inputs.pact_sha }}"
           echo "Actual SHA:   ${actual_sha}"
           test "${actual_sha}" = "${{ inputs.pact_sha }}"
@@ -60,9 +60,9 @@ jobs:
 
       - name: Point tests at upstream pact snapshot
         run: |
-          test -f .upstream/pact/SPEC.md
-          test -d .upstream/pact/fixtures
-          echo "PACT_SPEC_DIR=$PWD/.upstream/pact" >> "$GITHUB_ENV"
+          test -f .sync-inputs/pact/SPEC.md
+          test -d .sync-inputs/pact/fixtures
+          echo "PACT_SPEC_DIR=$PWD/.sync-inputs/pact" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -74,17 +74,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Preflight staged upstream snapshot
+      - name: Preflight upstream snapshot
         run: |
           test -n "${PACT_SPEC_DIR}"
-          test -f "$PACT_SPEC_DIR/SPEC.md"
-          test -d "$PACT_SPEC_DIR/fixtures"
-          find "$PACT_SPEC_DIR" -maxdepth 2 -type d | sort
+          test -f "${PACT_SPEC_DIR}/SPEC.md"
+          test -d "${PACT_SPEC_DIR}/fixtures"
+          find "${PACT_SPEC_DIR}/fixtures" -maxdepth 2 -type d | sort
 
-      # Stage 2 note:
-      # At first this just proves the pinned upstream snapshot is available
-      # during the pact-python test run. The next step is to add fixture-driven
-      # tests that actually consume tests/upstream_fixtures/.
       - name: Run tests
         run: |
           pytest -q
@@ -97,5 +93,7 @@ jobs:
           include-hidden-files: true
           path: |
             .sync-metadata/**
+            .sync-inputs/pact/SPEC.md
+            .sync-inputs/pact/fixtures/**
           if-no-files-found: error
           retention-days: 7
