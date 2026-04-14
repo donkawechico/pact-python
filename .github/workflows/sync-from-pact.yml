@@ -58,12 +58,11 @@ jobs:
           EOF
           printf '%s@%s\n' "${{ inputs.pact_repo }}" "${{ inputs.pact_sha }}" > .sync-metadata/UPSTREAM_PACT_SHA
 
-      - name: Stage upstream spec and fixtures for tests
+      - name: Point tests at upstream pact snapshot
         run: |
-          rm -rf tests/upstream_fixtures
-          mkdir -p tests/upstream_fixtures
-          cp .upstream/pact/SPEC.md tests/upstream_fixtures/SPEC.md
-          cp -R .upstream/pact/fixtures tests/upstream_fixtures/
+          test -f .upstream/pact/SPEC.md
+          test -d .upstream/pact/fixtures
+          echo "PACT_SPEC_DIR=$PWD/.upstream/pact" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -77,9 +76,10 @@ jobs:
 
       - name: Preflight staged upstream snapshot
         run: |
-          test -f tests/upstream_fixtures/SPEC.md
-          test -d tests/upstream_fixtures/fixtures
-          find tests/upstream_fixtures -maxdepth 2 -type d | sort
+          test -n "${PACT_SPEC_DIR}"
+          test -f "$PACT_SPEC_DIR/SPEC.md"
+          test -d "$PACT_SPEC_DIR/fixtures"
+          find "$PACT_SPEC_DIR" -maxdepth 2 -type d | sort
 
       # Stage 2 note:
       # At first this just proves the pinned upstream snapshot is available
@@ -94,8 +94,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sync-from-pact-${{ inputs.pact_sha }}
+          include-hidden-files: true
           path: |
             .sync-metadata/**
-            tests/upstream_fixtures/**
           if-no-files-found: error
           retention-days: 7
