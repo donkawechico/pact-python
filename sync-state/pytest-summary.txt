@@ -1,0 +1,4 @@
+Fixture test run failed.
+
+=========================== short test summary info ============================
+FAILED tests/test_core.py::test_invalid_fixture_configs_fail - Failed: DID NOT RAISE <class 'ValueError'>
