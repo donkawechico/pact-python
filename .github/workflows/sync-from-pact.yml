@@ -30,13 +30,31 @@ jobs:
       - name: Check out pact-python
         uses: actions/checkout@v4
 
+      - name: Read previous synced upstream SHA
+        run: |
+          mkdir -p .sync-metadata
+          if [ -f sync-state/upstream-pact.json ]; then
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("sync-state/upstream-pact.json")
+          data = json.loads(path.read_text())
+          previous = str(data.get("sha", "")).strip()
+          Path(".sync-metadata/previous-upstream-sha.txt").write_text(previous)
+          print(previous)
+          PY
+          else
+            : > .sync-metadata/previous-upstream-sha.txt
+          fi
+
       - name: Check out upstream pact
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.pact_repo }}
           ref: ${{ inputs.pact_sha }}
           path: .sync-inputs/pact
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Verify upstream snapshot
@@ -51,9 +69,11 @@ jobs:
       - name: Record upstream metadata
         run: |
           mkdir -p .sync-metadata
+          previous_sha="$(cat .sync-metadata/previous-upstream-sha.txt || true)"
           cat > .sync-metadata/pact-source.json <<EOF
           {
             "repo": "${{ inputs.pact_repo }}",
+            "previous_sha": "${previous_sha}",
             "sha": "${{ inputs.pact_sha }}"
           }
           EOF
