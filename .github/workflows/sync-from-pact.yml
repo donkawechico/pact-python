@@ -161,26 +161,9 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build PR body
+      - name: Build sync summary
         run: |
-          cat > .sync-metadata/pr-body.md <<EOF
-          This draft PR was opened automatically from an upstream PACT change.
-
-          Upstream source:
-          - Repo: \`${{ inputs.pact_repo }}\`
-          - SHA: \`${{ inputs.pact_sha }}\`
-
-          Current fixture result:
-          - Status: **${{ steps.syncmeta.outputs.test_status }}**
-
-          Workflow run:
-          - ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-          Summary:
-          \`\`\`
-          $(cat .sync-metadata/pytest-summary.txt)
-          \`\`\`
-          EOF
+          python scripts/build_sync_summary.py
 
       - name: Create or update draft PR
         env:
