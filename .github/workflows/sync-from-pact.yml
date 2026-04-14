@@ -36,7 +36,7 @@ jobs:
           repository: ${{ inputs.pact_repo }}
           ref: ${{ inputs.pact_sha }}
           path: .sync-inputs/pact
-          fetch-depth: 1
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Verify upstream snapshot
