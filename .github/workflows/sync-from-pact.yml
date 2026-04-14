@@ -1,0 +1,101 @@
+name: Sync from pact
+
+run-name: Sync from ${{ inputs.pact_repo }}@${{ inputs.pact_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      pact_repo:
+        description: Upstream PACT repository in owner/name form
+        required: true
+        type: string
+      pact_sha:
+        description: Upstream PACT commit SHA to sync against
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-from-pact-${{ inputs.pact_sha }}
+  cancel-in-progress: false
+
+jobs:
+  validate-upstream-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out pact-python
+        uses: actions/checkout@v4
+
+      - name: Check out upstream pact
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.pact_repo }}
+          ref: ${{ inputs.pact_sha }}
+          path: .upstream/pact
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify upstream snapshot
+        run: |
+          test -f .upstream/pact/SPEC.md
+          test -d .upstream/pact/fixtures
+          actual_sha="$(git -C .upstream/pact rev-parse HEAD)"
+          echo "Expected SHA: ${{ inputs.pact_sha }}"
+          echo "Actual SHA:   ${actual_sha}"
+          test "${actual_sha}" = "${{ inputs.pact_sha }}"
+
+      - name: Record upstream metadata
+        run: |
+          mkdir -p .sync-metadata
+          cat > .sync-metadata/pact-source.json <<EOF
+          {
+            "repo": "${{ inputs.pact_repo }}",
+            "sha": "${{ inputs.pact_sha }}"
+          }
+          EOF
+          printf '%s@%s\n' "${{ inputs.pact_repo }}" "${{ inputs.pact_sha }}" > .sync-metadata/UPSTREAM_PACT_SHA
+
+      - name: Stage upstream spec and fixtures for tests
+        run: |
+          rm -rf tests/upstream_fixtures
+          mkdir -p tests/upstream_fixtures
+          cp .upstream/pact/SPEC.md tests/upstream_fixtures/SPEC.md
+          cp -R .upstream/pact/fixtures tests/upstream_fixtures/
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pact-python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Preflight staged upstream snapshot
+        run: |
+          test -f tests/upstream_fixtures/SPEC.md
+          test -d tests/upstream_fixtures/fixtures
+          find tests/upstream_fixtures -maxdepth 2 -type d | sort
+
+      # Stage 2 note:
+      # At first this just proves the pinned upstream snapshot is available
+      # during the pact-python test run. The next step is to add fixture-driven
+      # tests that actually consume tests/upstream_fixtures/.
+      - name: Run tests
+        run: |
+          pytest -q
+
+      - name: Upload sync artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-from-pact-${{ inputs.pact_sha }}
+          path: |
+            .sync-metadata/**
+            tests/upstream_fixtures/**
+          if-no-files-found: error
+          retention-days: 7
